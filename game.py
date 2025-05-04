@@ -283,20 +283,19 @@ class APIPlayer(LLMPlayer):
         prompt = f"""
             /no_think
             You are playing a game of Liar's Dice. 
-            Goal: The purpose of the game is to be the last player remaining with at least one die. 
-            You lose a die each time you're caught bluffing—or if you wrongly challenge someone else's truthful bid.
-            
-            Rules: Each player gets 5 six-sided dice and a cup (to hide their roll). Everyone rolls their dice secretly and keeps their roll hidden under the cup.
+            Goal: The purpose of the game is to be the last player remaining with at least one die.
+
+            Rules: Each player gets 5 six-sided dice and are hidden from other players. Everyone rolls their dice secretly and keeps their roll hidden.
             Players take turns making bids about how many dice (across all players) show a certain face value. 
-            For example, “There are at least five 3s” means across everyone’s dice, the player is claiming there are five or more dice showing 3.
+            For example, If the current bid is “Bid(5, 3)” means across everyone’s dice, the player is claiming there are five or more dice showing 3.
 
             Turn Structure:
-            Each turn, you can either: Raise the bid (make a higher or riskier claim), or Challenge the previous player by calling them a liar.
-            You must increase the bid by: Quantity: “Six 3s” → “Seven 3s” OR Face value: “Six 3s” → “Six 4s” OR Both: “Six 3s” → “Seven 4s”. Note: You can’t go backwards in value or quantity.
-            If you think the previous bid is a lie, say “Liar!”. 
-            Everyone reveals their dice. Count how many dice show the face that was bid.
-            If the bid was true:Challenger loses a die.
-            If the bid was false: Bidder loses a die.
+            Each turn, you can either: Raise the bid, or challenge and call the previous player bid.
+            If you are raising the bid you must increase the bid either by quantity or face value or both for eg: Quantity: Current Bid - (6, 3) → “Bid (7, 3)” OR Face value: Current Bid - (6, 3) → “Bid(6, 4)” OR Both: Current Bid - (6, 3) → “Bid(7, 4)”. Note: You can’t go backwards in value or quantity.
+            If you want to call the previous bid, say “Call”. 
+            Everyone reveals their dice and the current face are counted.
+            If the actual count of that face value among all dice is less than the bid, the last bidder loses one die.
+            Otherwise, the caller loses one die.
             Then everyone rerolls their dice and a new round begins.
 
             End condition: Players are eliminated when they lose all their dice. The game continues until one player remains.
