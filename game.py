@@ -1,7 +1,7 @@
 import random
 import os
 from abc import ABC, abstractmethod
-from vllm import LLM, SamplingParams
+# from vllm import LLM, SamplingParams
 import ray
 import asyncio
 from enum import Enum
@@ -9,6 +9,7 @@ from enum import Enum
 import openai
 from openai import OpenAI
 import dotenv
+import json
 
 dotenv.load_dotenv()
 
@@ -26,7 +27,7 @@ class LLMWrapper:
             enable_prefix_caching=True
         )
         self.sampling_params = SamplingParams(
-            max_tokens=2000,
+            # max_tokens=2000,
             n=1,  # Change for best of 256 eval
             temperature=0.7
         )
@@ -51,7 +52,7 @@ class LLMWrapper:
         self.queue_barrier.wait()
         return self.responses[idx]
     
-llm_wrapper = LLMWrapper.remote()
+# llm_wrapper = LLMWrapper.remote()
     
 @ray.remote
 class APIWrapper:
@@ -68,7 +69,7 @@ class APIWrapper:
             ],
             model='Qwen/Qwen3-235B-A22B-fp8-tput',
             temperature=0.7,
-            max_tokens=2000,
+            # max_tokens=2000,
             n=1
         )
         return response.choices[0].message.content
@@ -96,6 +97,9 @@ class Player:
             
     def get_action(self, *args):
         return Call()
+    
+    def __str__(self):
+        return f"{self.name}"
         
 class Action(ABC):
     
@@ -152,7 +156,7 @@ class LiarDiceGame:
         return (idx + 1) % len(self.players)
 
     def valid_bid(self, new_bid):
-        return self.current_bid is None or (new_bid.is_valid() and new_bid.gt(self.current_bid))
+        return new_bid.is_valid() and (self.current_bid is None or new_bid.gt(self.current_bid))
 
     def count_face(self, face):
         return sum(p.face_count(face) for p in self.players)
@@ -169,26 +173,27 @@ class LiarDiceGame:
     def eliminate_players(self):
         self.players = [p for p in self.players if p.dice_count > 0]
 
-    def play_round(self, round_callback=None):
+    def play_round(self):
         self.reset_round()
         self.loser = None
         self.winner = None
         while True:
             player = self.players[self.turn]
             action = player.get_action(self)
+            self.bid_history.append((player, action))
             if isinstance(action, Bid):
                 if self.valid_bid(action):
                     self.current_bid = action
-                    self.bid_history.append((player, action))
+                    self.turn = self.next_player(self.turn)
                 else:
                     player.lose_die()
                     self.loser = player
                     print(f"{player.name} made an invalid bid!")
                     break
             elif isinstance(action, Call):
+                bidder_idx = self.prev_player(self.turn)
+                bidder = self.players[bidder_idx]
                 if self.wins_challenge():
-                    bidder_idx = self.prev_player(self.turn)
-                    bidder = self.players[bidder_idx]
                     bidder.lose_die()
                     self.winner = player
                     self.loser = bidder
@@ -205,9 +210,12 @@ class LiarDiceGame:
                 self.loser = player
                 print(f"{player.name} made an invalid action!")
                 break
+        # Logging the round results
         self.eliminate_players()
-        if round_callback:
-            round_callback(self)
+        if self.winner:
+            self.winner.commit()
+        for p in self.players:
+            p.clear()
         
         
 class LLMPlayer(Player):
@@ -286,7 +294,6 @@ class vLLMPlayer(LLMPlayer):
             If you call and the last player is telling the truth, you lose a die.
             If you bid and the next player calls, you lose a die if your bid is incorrect.
             Enclose your action in a box.
-            Enclose your thinking inside <think> </think> tags.
             Verify your process and make sure your action is valid.
             Your action should be in the format:
             <action>Bid(quantity, face)</action> or <action>Call</action>. /no_think
@@ -308,6 +315,9 @@ class APIPlayer(LLMPlayer):
         history, num_players = data
         prompt = f"""
             /no_think
+            Think step by step, but be concise in your reasoning. Focus on the most important factors and avoid unnecessary details.
+            Keep your thinking under 400 words.
+            
             You are playing a game of Liar's Dice. 
             Goal: The purpose of the game is to be the last player remaining with at least one die.
 
@@ -347,7 +357,6 @@ class APIPlayer(LLMPlayer):
             If you call and the last player is telling the truth, you lose a die.
             If you bid and the next player calls, you lose a die if your bid is incorrect.
             Enclose your action in a box.
-            Enclose your thinking inside <think> </think> tags.
             Verify your process and make sure your action is valid.
             Your action should be in the format:
             <action>Bid(quantity, face)</action> or <action>Call</action>. /no_think
@@ -359,7 +368,6 @@ class APIPlayer(LLMPlayer):
         return ray.get(self.client.set_prompt.remote(prompt))
         
 # Replace the original LogResponseWrapper selection with this wrapper‐around‐APIPlayer
-
 class LogResponseWrapper:
     def __init__(self, player):
         # wrap an APIPlayer instance
@@ -407,18 +415,25 @@ class LogResponseWrapper:
         return self.player.parse_response(response)
 
     def _extract_reason(self, response):
-        try:
-            return response.split("<think>")[1].split("</think>")[0].strip()
-        except Exception:
-            return ""
+        # try:
+        #     return response.split("<think>")[1].split("</think>")[0].strip()
+        # except Exception:
+        #     # If parsing fails, return the entire response as reasoning
+        #     return response
+        return response
 
     def commit(self):
         # write prompt, reasoning pairs to a CSV
-        fn = f"{self.player.name}_log.csv"
+        fn = f"{self.player.name}_log.jsonl"
         with open(fn, "a") as f:
             for prompt, reasoning in zip(self.prompt_queue, self.reasoning_queue):
-                # escape newlines or commas if needed
-                f.write(f"\"{prompt.strip()}\",\"{reasoning.strip()}\"\n")
+                entry = {
+                    "messages": [
+                        {"role": "user",      "content": prompt},
+                        {"role": "assistant", "content": reasoning}
+                    ]
+                }
+                f.write(json.dumps(entry) + "\n")
 
     def clear(self):
         self.prompt_queue.clear()
@@ -429,15 +444,9 @@ def run_game(num_players):
     # build a fresh game inside the remote task
     players = [LogResponseWrapper(APIPlayer(f"Player {i}")) for i in range(num_players)]
     game = LiarDiceGame(players)
-    
-    def round_callback(game):
-        if game.winner:
-            game.winner.commit()
-        for player in game.players:
-            player.clear()
 
     while len(game.players) > 1:
-        game.play_round(round_callback)
+        game.play_round()
         print(f"Round over. Remaining players: {[p.name for p in game.players]}")
 
     winner = game.players[0].name
