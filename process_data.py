@@ -60,6 +60,7 @@ if __name__ == "__main__":
         "[GAME] Player 2 bids 4 of face 4.\n"
         "[Player 0] I think that's too high. [Call]\n"
         "[GAME] Player 0 calls! The actual count of face 4 is 3, which is LESS than 4.\n"
+        "[Player 1] I'll bid 3 dice with face value 4. [Bid: 3, 4]\n"
     )
     # Suppose Player 0 wins:
     print(format_game_json_samples(sample_game, "Player 0"))
