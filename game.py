@@ -1,7 +1,7 @@
 import random
 import os
 from abc import ABC, abstractmethod
-# from vllm import LLM, SamplingParams
+from vllm import LLM, SamplingParams
 import ray
 import asyncio
 from enum import Enum
@@ -14,44 +14,44 @@ dotenv.load_dotenv()
 
 os.environ['CUDA_VISIBLE_DEVICES'] = '0, 1, 2, 3'
 
-# @ray.remote
-# class LLMWrapper:
+@ray.remote
+class LLMWrapper:
 
-#     def __init__(self):
-#         self.model = LLM(
-#             model='Qwen/Qwen2.5-1.5B-Instruct',
-#             gpu_memory_utilization=0.95, 
-#             max_model_len=2048,
-#             tensor_parallel_size=1, 
-#             enable_prefix_caching=True
-#         )
-#         self.sampling_params = SamplingParams(
-#             max_tokens=2000,
-#             n=1,  # Change for best of 256 eval
-#             temperature=0.7
-#         )
-#         self.queue_length = 64
-#         self.queue_idx = 0
-#         self.queue_barrier = asyncio.Barrier(self.queue_length)
-#         self.job_queue = [None for _ in range(self.queue_length)]
-#         self.responses = [None for _ in range(self.queue_length)]
+    def __init__(self):
+        self.model = LLM(
+            model='Qwen/Qwen2.5-1.5B-Instruct',
+            gpu_memory_utilization=0.95, 
+            max_model_len=2048,
+            tensor_parallel_size=1, 
+            enable_prefix_caching=True
+        )
+        self.sampling_params = SamplingParams(
+            max_tokens=2000,
+            n=1,  # Change for best of 256 eval
+            temperature=0.7
+        )
+        self.queue_length = 64
+        self.queue_idx = 0
+        self.queue_barrier = asyncio.Barrier(self.queue_length)
+        self.job_queue = [None for _ in range(self.queue_length)]
+        self.responses = [None for _ in range(self.queue_length)]
         
-#     async def set_prompt(self, prompt):
-#         idx = self.queue_idx
-#         self.job_queue[idx] = prompt
-#         self.queue_idx += 1
-#         # The last request in the queue will trigger the model to generate
-#         if idx == self.queue_length - 1:
-#             self.responses = self.model.generate(
-#                 self.job_queue,
-#                 sampling_params=self.sampling_params,
-#                 max_concurrent_requests=self.queue_length
-#             )
-#             self.queue_idx = 0
-#         self.queue_barrier.wait()
-#         return self.responses[idx]
-
-# vllm_wrapper = LLMWrapper.remote()
+    async def set_prompt(self, prompt):
+        idx = self.queue_idx
+        self.job_queue[idx] = prompt
+        self.queue_idx += 1
+        # The last request in the queue will trigger the model to generate
+        if idx == self.queue_length - 1:
+            self.responses = self.model.generate(
+                self.job_queue,
+                sampling_params=self.sampling_params,
+                max_concurrent_requests=self.queue_length
+            )
+            self.queue_idx = 0
+        self.queue_barrier.wait()
+        return self.responses[idx]
+    
+llm_wrapper = LLMWrapper.remote()
     
 @ray.remote
 class APIWrapper:
@@ -238,39 +238,65 @@ class LLMPlayer(Player):
         raise NotImplementedError("Subclasses should implement this method.")
     
         
-# class vLLMPlayer(LLMPlayer):
-#     def __init__(self, name, dice_count=5):
-#         super().__init__(name, dice_count)
-#         self.client = llm_wrapper
+class vLLMPlayer(LLMPlayer):
+    def __init__(self, name, dice_count=5):
+        super().__init__(name, dice_count)
+        self.client = llm_wrapper
+        
+    def generate_prompt(self, data):
+        history, num_players = data
+        prompt = f"""
+            /no_think
+            You are playing a game of Liar's Dice. 
+            Goal: The purpose of the game is to be the last player remaining with at least one die.
 
-#     def generate_response(self, data):
-#         history, num_players = data
-#         prompt = f"""You are playing a game of Liar's Dice. 
-#             You have the following dice: {self.dice}.
-#             You are {self.name}.
-#             There are {num_players} players in the game.
-#             The bid history is:
-#             """
-#         if history:
-#             for player, action in history:
-#                 prompt += f"{player.name} bids {action}\n"
-#         else:
-#             prompt += "No bids yet.\n"
+            Rules: Each player gets 5 six-sided dice and are hidden from other players. Everyone rolls their dice secretly and keeps their roll hidden.
+            Players take turns making bids about how many dice (across all players) show a certain face value. 
+            For example, If the current bid is “Bid(5, 3)” means across everyone’s dice, the player is claiming there are five or more dice showing 3.
+
+            Turn Structure:
+            Each turn, you can either: Raise the bid, or challenge and call the previous player bid.
+            If you are raising the bid you must increase the bid either by quantity or face value or both for eg: Quantity: Current Bid - (6, 3) → “Bid (7, 3)” OR Face value: Current Bid - (6, 3) → “Bid(6, 4)” OR Both: Current Bid - (6, 3) → “Bid(7, 4)”. Note: You can’t go backwards in value or quantity.
+            If you want to call the previous bid, say “Call”. 
+            Everyone reveals their dice and the current face are counted.
+            If the actual count of that face value among all dice is less than the bid, the last bidder loses one die.
+            Otherwise, the caller loses one die.
+            Then everyone rerolls their dice and a new round begins.
+
+            End condition: Players are eliminated when they lose all their dice. The game continues until one player remains.
+
+            Strategy:
+            - Bluff early, when many dice are in play—harder to call.
+            - Track your own dice, use them to guess probabilities.
+            - Adapt—if you have fewer dice, bluffing gets riskier.
+
+            Game Conditions: You have the following dice: {self.dice}.
+            There are {num_players} players in the game.
+            The bid history is:
+            """
+        if history:
+            for player, action in history:
+                prompt += f"{player.name} bids {action}\n"
+        else:
+            prompt += "No bids yet.\n"
             
-#         prompt += f"""Your turn. What action do you want to take? (Bid or Call)
-#             You can bid a quantity of dice and a face value (1-6), or call the last player's bid.
-#             If you bid, your bid must be higher than the last player's bid in face value or have the same face value and higher quantity.
-#             Remember, you can only call if you think the last player is lying.
-#             If you call and the last player is telling the truth, you lose a die.
-#             If you bid and the next player calls, you lose a die if your bid is incorrect.
-#             Enclose your action in a box.
-#             Enclose your thinking inside <think> </think> tags.
-#             Verify your process and make sure your action is valid.
-#             Your action should be in the format:
-#             <action>Bid(quantity, face)</action> or <action>Call</action>.
-#         """
-#         response_future = asyncio.run(self.client.set_prompt(prompt))
-#         return ray.get(response_future)
+        prompt += f"""Your turn. What action do you want to take? (Bid or Call)
+            You can bid a quantity of dice and a face value (1-6), or call the last player's bid.
+            Remember, you can only call if you think the last player is lying.
+            If you call and the last player is telling the truth, you lose a die.
+            If you bid and the next player calls, you lose a die if your bid is incorrect.
+            Enclose your action in a box.
+            Enclose your thinking inside <think> </think> tags.
+            Verify your process and make sure your action is valid.
+            Your action should be in the format:
+            <action>Bid(quantity, face)</action> or <action>Call</action>. /no_think
+        """
+        return prompt
+
+    def generate_response(self, data):
+        prompt = self.generate_prompt(data)
+        response_future = asyncio.run(self.client.set_prompt(prompt))
+        return ray.get(response_future)
     
 class APIPlayer(LLMPlayer):
     
