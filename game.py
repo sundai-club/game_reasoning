@@ -169,8 +169,10 @@ class LiarDiceGame:
     def eliminate_players(self):
         self.players = [p for p in self.players if p.dice_count > 0]
 
-    def play_round(self):
+    def play_round(self, round_callback=None):
         self.reset_round()
+        self.loser = None
+        self.winner = None
         while True:
             player = self.players[self.turn]
             action = player.get_action(self)
@@ -180,6 +182,7 @@ class LiarDiceGame:
                     self.bid_history.append((player, action))
                 else:
                     player.lose_die()
+                    self.loser = player
                     print(f"{player.name} made an invalid bid!")
                     break
             elif isinstance(action, Call):
@@ -187,17 +190,24 @@ class LiarDiceGame:
                     bidder_idx = self.prev_player(self.turn)
                     bidder = self.players[bidder_idx]
                     bidder.lose_die()
+                    self.winner = player
+                    self.loser = bidder
                     print(f"{player.name} called the bid correctly!")
                     break
                 else:
                     player.lose_die()
+                    self.winner = bidder
+                    self.loser = player
                     print(f"{player.name} called the bid incorrectly!")
                     break
             else:
                 player.lose_die()
+                self.loser = player
                 print(f"{player.name} made an invalid action!")
                 break
         self.eliminate_players()
+        if round_callback:
+            round_callback(self)
         
         
 class LLMPlayer(Player):
@@ -223,6 +233,9 @@ class LLMPlayer(Player):
         response = self.generate_response([game_data.bid_history, game_data.num_players])
         action = self.parse_response(response)
         return action
+    
+    def generate_response(self, data):
+        raise NotImplementedError("Subclasses should implement this method.")
     
         
 # class vLLMPlayer(LLMPlayer):
@@ -265,9 +278,11 @@ class APIPlayer(LLMPlayer):
         super().__init__(name, dice_count)
         self.client = api_wrapper
     
-    def generate_response(self, data):
+    def generate_prompt(self, data):
         history, num_players = data
-        prompt = f"""You are playing a game of Liar's Dice. 
+        prompt = f"""
+            /no_think
+            You are playing a game of Liar's Dice. 
             Goal: The purpose of the game is to be the last player remaining with at least one die. 
             You lose a die each time you're caught bluffing—or if you wrongly challenge someone else's truthful bid.
             
@@ -310,20 +325,94 @@ class APIPlayer(LLMPlayer):
             Enclose your thinking inside <think> </think> tags.
             Verify your process and make sure your action is valid.
             Your action should be in the format:
-            <action>Bid(quantity, face)</action> or <action>Call</action>. /no_think/
+            <action>Bid(quantity, face)</action> or <action>Call</action>. /no_think
         """
-        print("Deploying prompt to API:", prompt)
+        return prompt
+    
+    def generate_response(self, data):
+        prompt = self.generate_prompt(data)
         return ray.get(self.client.set_prompt.remote(prompt))
         
+# Replace the original LogResponseWrapper selection with this wrapper‐around‐APIPlayer
+
+class LogResponseWrapper:
+    def __init__(self, player):
+        # wrap an APIPlayer instance
+        self.player = player
+        self.prompt_queue = []
+        self.reasoning_queue = []
+
+    @property
+    def name(self):
+        return self.player.name
+
+    @property
+    def dice_count(self):
+        return self.player.dice_count
+
+    @property
+    def dice(self):
+        return self.player.dice
+
+    @dice.setter
+    def dice(self, new_dice):
+        self.player.dice = new_dice
+
+    def roll(self):
+        return self.player.roll()
+
+    def lose_die(self):
+        return self.player.lose_die()
+
+    def face_count(self, face):
+        return self.player.face_count(face)
+
+    def get_action(self, game):
+        # Prepare the prompt & call the wrapped APIPlayer
+        data = [game.bid_history, game.num_players]
+        prompt = self.player.generate_prompt(data)
+        response = ray.get(self.player.client.set_prompt.remote(prompt))
+        
+        # extract and log reasoning
+        reasoning = self._extract_reason(response)
+        self.prompt_queue.append(prompt)
+        self.reasoning_queue.append(reasoning)
+        
+        # parse & return the action
+        return self.player.parse_response(response)
+
+    def _extract_reason(self, response):
+        try:
+            return response.split("<think>")[1].split("</think>")[0].strip()
+        except Exception:
+            return ""
+
+    def commit(self):
+        # write prompt, reasoning pairs to a CSV
+        fn = f"{self.player.name}_log.csv"
+        with open(fn, "a") as f:
+            for prompt, reasoning in zip(self.prompt_queue, self.reasoning_queue):
+                # escape newlines or commas if needed
+                f.write(f"\"{prompt.strip()}\",\"{reasoning.strip()}\"\n")
+
+    def clear(self):
+        self.prompt_queue.clear()
+        self.reasoning_queue.clear()
     
 @ray.remote
 def run_game(num_players):
     # build a fresh game inside the remote task
-    players = [APIPlayer(f"Player {i}") for i in range(num_players)]
+    players = [LogResponseWrapper(APIPlayer(f"Player {i}")) for i in range(num_players)]
     game = LiarDiceGame(players)
+    
+    def round_callback(game):
+        if game.winner:
+            game.winner.commit()
+        for player in game.players:
+            player.clear()
 
     while len(game.players) > 1:
-        game.play_round()
+        game.play_round(round_callback)
         print(f"Round over. Remaining players: {[p.name for p in game.players]}")
 
     winner = game.players[0].name
