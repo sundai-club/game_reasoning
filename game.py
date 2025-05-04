@@ -2,7 +2,6 @@ import random
 import os
 from abc import ABC, abstractmethod
 # from vllm import LLM, SamplingParams
-import ray
 import asyncio
 from enum import Enum
 
@@ -11,11 +10,17 @@ from openai import OpenAI
 import dotenv
 import json
 
+import ray
+
 dotenv.load_dotenv()
 
 os.environ['CUDA_VISIBLE_DEVICES'] = '0, 1, 2, 3'
 
-@ray.remote
+ray.init(
+    num_cpus=96
+)
+
+@ray.remote(num_cpus=0)
 class LLMWrapper:
 
     def __init__(self):
@@ -54,7 +59,7 @@ class LLMWrapper:
     
 # llm_wrapper = LLMWrapper.remote()
     
-@ray.remote
+@ray.remote(num_cpus=32)
 class APIWrapper:
     def __init__(self):
         self.client = OpenAI(
@@ -184,7 +189,6 @@ class LiarDiceGame:
             if isinstance(action, Bid):
                 if self.valid_bid(action):
                     self.current_bid = action
-                    self.turn = self.next_player(self.turn)
                 else:
                     player.lose_die()
                     self.loser = player
@@ -210,6 +214,7 @@ class LiarDiceGame:
                 self.loser = player
                 print(f"{player.name} made an invalid action!")
                 break
+            self.turn = self.next_player(self.turn)
         # Logging the round results
         self.eliminate_players()
         if self.winner:
@@ -232,7 +237,7 @@ class LLMPlayer(Player):
                 # Could not parse action!
                 return Bid(-1, -1)
         except Exception as e:
-            print(f"Error parsing response: {response}")
+            print(f"Error parsing response")
             # If parsing fails, return an invalid bid
             # to ensure the player loses a die.
             return Bid(-1, -1)
@@ -439,7 +444,7 @@ class LogResponseWrapper:
         self.prompt_queue.clear()
         self.reasoning_queue.clear()
     
-@ray.remote
+@ray.remote(num_cpus=32)
 def run_game(num_players):
     # build a fresh game inside the remote task
     players = [LogResponseWrapper(APIPlayer(f"Player {i}")) for i in range(num_players)]
@@ -454,7 +459,7 @@ def run_game(num_players):
     return winner
 
 def main():
-    PARALLEL_GAMES = 1
+    PARALLEL_GAMES = 1024
     NUM_PLAYERS = 2
     futures = [run_game.remote(NUM_PLAYERS) for _ in range(PARALLEL_GAMES)]
     winners = ray.get(futures)
